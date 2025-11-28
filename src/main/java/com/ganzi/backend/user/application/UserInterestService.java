@@ -1,14 +1,13 @@
 package com.ganzi.backend.user.application;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ganzi.backend.animal.domain.Animal;
 import com.ganzi.backend.animal.domain.AnimalEmbedding;
 import com.ganzi.backend.animal.domain.repository.AnimalEmbeddingRepository;
 import com.ganzi.backend.animal.domain.repository.AnimalRepository;
 import com.ganzi.backend.global.code.status.ErrorStatus;
 import com.ganzi.backend.global.exception.GeneralException;
+import com.ganzi.backend.global.embedding.EmbeddingJsonConverter;
+import com.ganzi.backend.global.embedding.WeightedEmbeddingAggregator;
 import com.ganzi.backend.user.domain.User;
 import com.ganzi.backend.user.domain.UserEmbedding;
 import com.ganzi.backend.user.domain.UserInterest;
@@ -40,7 +39,7 @@ public class UserInterestService {
     private final AnimalRepository animalRepository;
     private final AnimalEmbeddingRepository animalEmbeddingRepository;
     private final UserLikeRepository userLikeRepository;
-    private final ObjectMapper objectMapper;
+    private final EmbeddingJsonConverter embeddingJsonConverter;
 
 
     @Transactional
@@ -70,69 +69,38 @@ public class UserInterestService {
                 .orElseThrow(() -> new GeneralException(ErrorStatus.USER_NOT_FOUND));
 
         Map<String, Double> weightMap = buildWeightMap(user);
-        if(weightMap.isEmpty()) {
+        if (weightMap.isEmpty()) {
             return;
         }
 
-        float[] sum = null;
-        double totalWeight = 0.0;
-        for (Map.Entry<String, Double> entry : weightMap.entrySet()) {
-            String deserNo = entry.getKey();
-            double weight = entry.getValue();
-            Optional<AnimalEmbedding> optEmbedding = animalEmbeddingRepository.findById(deserNo);
-            if (optEmbedding.isEmpty()) {
-                continue;
-            }
-            float[] vector;
-            try {
-                vector = objectMapper.readValue(
-                        optEmbedding.get().getEmbeddingJson(),
-                        new TypeReference<float[]>() {}
-                );
-            } catch (JsonProcessingException e) {
-                log.warn("Animal Embedding 역직렬화 실패 desertionNo={}", deserNo, e);
-                continue;
-            }
-            if (sum == null) {
-                sum = new float[vector.length];
-            }
-            for (int i = 0; i < vector.length; i++) {
-                sum[i] += (float) (vector[i] * weight);
-            }
-            totalWeight += weight;
-        }
-
-        if (sum == null || totalWeight == 0.0) {
+        Optional<float[]> normalizedAverage = aggregateUserEmbedding(weightMap);
+        if (normalizedAverage.isEmpty()) {
             return;
         }
-
-        for (int i = 0; i < sum.length; i++) {
-            sum[i] /= (float) totalWeight;
-        }
-
-        // L2 정규화
-        double norm = 0.0;
-        for (float v : sum) {
-            norm += v * v;
-        }
-        norm = Math.sqrt(norm);
-        if (norm > 0) {
-            for (int i = 0; i < sum.length; i++) {
-                sum[i] /= (float) norm;
-            }
-        }
+        float[] userEmbeddingVector = normalizedAverage.get();
 
         UserEmbedding userEmbedding = userEmbeddingRepository.findByUserId(user.getId())
                 .orElseGet(() -> UserEmbedding.builder().user(user).build());
 
-        try {
-            String json = objectMapper.writeValueAsString(sum);
-            userEmbedding.updateUserEmbedding(json, sum.length);
-            userEmbeddingRepository.save(userEmbedding);
-        } catch (JsonProcessingException e) {
-            log.error("User Embedding 직렬화 실패 userId={}", user.getId(), e);
-            throw new GeneralException(ErrorStatus.DATABASE_ERROR);
+        String embeddingJson = embeddingJsonConverter.toJson(userEmbeddingVector, "userId=" + user.getId())
+                .orElseThrow(() -> new GeneralException(ErrorStatus.DATABASE_ERROR));
+
+        userEmbedding.updateUserEmbedding(embeddingJson, userEmbeddingVector.length);
+        userEmbeddingRepository.save(userEmbedding);
+    }
+
+    private Optional<float[]> aggregateUserEmbedding(Map<String, Double> weightMap) {
+        WeightedEmbeddingAggregator aggregator = new WeightedEmbeddingAggregator(embeddingJsonConverter);
+
+        for (Map.Entry<String, Double> entry : weightMap.entrySet()) {
+            String desertionNo = entry.getKey();
+            double weight = entry.getValue();
+            animalEmbeddingRepository.findById(desertionNo)
+                    .map(AnimalEmbedding::getEmbeddingJson)
+                    .ifPresent(json -> aggregator.add(json, weight, "animal desertionNo=" + desertionNo));
         }
+
+        return aggregator.normalizedAverage();
     }
 
 
