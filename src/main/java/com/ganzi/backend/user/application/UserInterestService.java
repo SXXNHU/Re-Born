@@ -1,14 +1,12 @@
 package com.ganzi.backend.user.application;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ganzi.backend.animal.domain.Animal;
 import com.ganzi.backend.animal.domain.AnimalEmbedding;
 import com.ganzi.backend.animal.domain.repository.AnimalEmbeddingRepository;
 import com.ganzi.backend.animal.domain.repository.AnimalRepository;
 import com.ganzi.backend.global.code.status.ErrorStatus;
 import com.ganzi.backend.global.exception.GeneralException;
+import com.ganzi.backend.global.embedding.EmbeddingJsonConverter;
 import com.ganzi.backend.user.domain.User;
 import com.ganzi.backend.user.domain.UserEmbedding;
 import com.ganzi.backend.user.domain.UserInterest;
@@ -40,7 +38,7 @@ public class UserInterestService {
     private final AnimalRepository animalRepository;
     private final AnimalEmbeddingRepository animalEmbeddingRepository;
     private final UserLikeRepository userLikeRepository;
-    private final ObjectMapper objectMapper;
+    private final EmbeddingJsonConverter embeddingJsonConverter;
 
 
     @Transactional
@@ -83,14 +81,10 @@ public class UserInterestService {
             if (optEmbedding.isEmpty()) {
                 continue;
             }
-            float[] vector;
-            try {
-                vector = objectMapper.readValue(
-                        optEmbedding.get().getEmbeddingJson(),
-                        new TypeReference<float[]>() {}
-                );
-            } catch (JsonProcessingException e) {
-                log.warn("Animal Embedding 역직렬화 실패 desertionNo={}", deserNo, e);
+            float[] vector = embeddingJsonConverter.toVector(
+                            optEmbedding.get().getEmbeddingJson(), "animal desertionNo=" + deserNo)
+                    .orElse(null);
+            if (vector == null) {
                 continue;
             }
             if (sum == null) {
@@ -125,14 +119,11 @@ public class UserInterestService {
         UserEmbedding userEmbedding = userEmbeddingRepository.findByUserId(user.getId())
                 .orElseGet(() -> UserEmbedding.builder().user(user).build());
 
-        try {
-            String json = objectMapper.writeValueAsString(sum);
-            userEmbedding.updateUserEmbedding(json, sum.length);
-            userEmbeddingRepository.save(userEmbedding);
-        } catch (JsonProcessingException e) {
-            log.error("User Embedding 직렬화 실패 userId={}", user.getId(), e);
-            throw new GeneralException(ErrorStatus.DATABASE_ERROR);
-        }
+        String embeddingJson = embeddingJsonConverter.toJson(sum, "userId=" + user.getId())
+                .orElseThrow(() -> new GeneralException(ErrorStatus.DATABASE_ERROR));
+
+        userEmbedding.updateUserEmbedding(embeddingJson, sum.length);
+        userEmbeddingRepository.save(userEmbedding);
     }
 
 
